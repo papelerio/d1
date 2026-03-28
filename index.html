@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Súper Drive JSON</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root { --primary: #3498db; --danger: #e74c3c; --success: #27ae60; --bg: #f0f2f5; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }
+        
+        /* Drop Area */
+        #drop-area { border: 2px dashed #bbb; border-radius: 10px; padding: 30px; text-align: center; background: #fafafa; transition: 0.3s; cursor: pointer; margin-bottom: 20px; }
+        #drop-area.highlight { border-color: var(--primary); background: #ebf5fb; }
+
+        /* Toolbar */
+        .toolbar { margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+        .btn-primary { background: var(--primary); color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; }
+        .btn-primary:hover { background: #2980b9; }
+
+        /* Estructura de Carpetas */
+        .folder-section { margin-bottom: 25px; border: 1px solid #eee; border-radius: 10px; overflow: hidden; }
+        .folder-header { background: #f8f9fa; padding: 12px 15px; font-weight: bold; color: #2c3e50; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #eee; cursor: pointer; }
+        .folder-header:hover { background: #e9ecef; }
+        .folder-header i:first-child { margin-right: 10px; color: #f1c40f; }
+        .folder-content { display: block; }
+        .folder-content.collapsed { display: none; }
+
+        /* Filas de Archivos */
+        .file-item { display: flex; align-items: center; padding: 10px 15px; border-bottom: 1px solid #f9f9f9; background: white; transition: 0.2s; }
+        .file-item:hover { background: #f1f8ff; }
+        .file-info { flex-grow: 1; display: flex; align-items: center; cursor: pointer; min-width: 0; }
+        .file-info i { margin-right: 12px; font-size: 1.1rem; width: 25px; text-align: center; }
+        .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        /* Botones */
+        .actions { display: flex; gap: 5px; }
+        .btn { border: none; background: #eee; padding: 7px 10px; border-radius: 5px; cursor: pointer; color: #555; transition: 0.2s; }
+        .btn:hover { background: #ddd; color: #000; }
+        .btn-del:hover { background: #fadbd8; color: var(--danger); }
+        
+        /* Modal Imagen */
+        #previewModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; z-index: 1000; }
+        #previewModal img { max-width: 90%; max-height: 90%; border: 2px solid white; }
+
+        /* Mensajes */
+        .message { position: fixed; bottom: 20px; right: 20px; background: #333; color: white; padding: 10px 20px; border-radius: 5px; z-index: 2000; animation: fadeOut 3s forwards; }
+        @keyframes fadeOut { 0% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2><i class="fas fa-database"></i> Mi Nube con Mapa JSON</h2>
+
+    <div class="toolbar">
+        <button class="btn-primary" onclick="crearCarpeta()"><i class="fas fa-folder-plus"></i> Crear Carpeta</button>
+        <button class="btn-primary" onclick="refreshAll()"><i class="fas fa-sync-alt"></i> Actualizar</button>
+    </div>
+
+    <div id="drop-area">
+        <i class="fas fa-cloud-upload-alt fa-2x"></i>
+        <p>Arrastra archivos aquí o haz clic para subir</p>
+        <input type="file" id="fileElem" multiple style="display:none" onchange="handleFiles(this.files, rutaActual)">
+    </div>
+
+    <div id="visualizador">Cargando archivos...</div>
+</div>
+
+<div id="previewModal" onclick="this.style.display='none'"><img id="imgFull"></div>
+
+<script>
+    const SUPABASE_URL = 'https://nxwznvvgrsmesfovelxg.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_dsELIpXy00NpPwoYOsHZpw_186vA8IK';
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const bucketName = 'Archivos';
+    const mapName = '.organizacion.json'; // Cambié a nombre oculto para evitar conflictos
+
+    let config = { estructura: {} }; // { "ruta/carpeta": ["archivo1", "archivo2"] }
+    let rutaActual = '';
+    let mapaCache = null;
+
+    // --- INICIO ---
+    async function init() {
+        await cargarMapa();
+        render();
+    }
+
+    // --- GESTIÓN DEL JSON (con mejor manejo de errores) ---
+    async function cargarMapa() {
+        try {
+            // Intentar descargar el mapa existente
+            const { data, error } = await db.storage.from(bucketName).download(mapName);
+            
+            if (!error && data) {
+                const text = await data.text();
+                config = JSON.parse(text);
+                mapaCache = JSON.parse(JSON.stringify(config)); // Guardar copia para detectar cambios
+                console.log("Mapa cargado exitosamente:", config);
+            } else {
+                // Si no existe, crear estructura inicial
+                console.log("No hay mapa previo, creando uno nuevo.");
+                config = { estructura: {} };
+                await guardarMapa();
+            }
+        } catch (error) {
+            console.error("Error al cargar mapa:", error);
+            mostrarMensaje("Error al cargar la organización, usando estructura vacía");
+            config = { estructura: {} };
+        }
+    }
+
+    async function guardarMapa() {
+        try {
+            const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+            const { error } = await db.storage.from(bucketName).upload(mapName, blob, { 
+                upsert: true,
+                cacheControl: 'no-cache'
+            });
+            
+            if (error) {
+                console.error("Error al guardar mapa:", error);
+                mostrarMensaje("Error al guardar la organización");
+                return false;
+            }
+            
+            console.log("Mapa guardado exitosamente");
+            mapaCache = JSON.parse(JSON.stringify(config));
+            return true;
+        } catch (error) {
+            console.error("Error en guardarMapa:", error);
+            mostrarMensaje("Error al guardar la organización");
+            return false;
+        }
+    }
+
+    // --- FUNCIONES DE ARCHIVOS ---
+    async function handleFiles(files, carpetaDestino = '') {
+        let cambios = false;
+        
+        for (let file of files) {
+            const rutaCompleta = carpetaDestino ? `${carpetaDestino}/${file.name}` : file.name;
+            
+            // Verificar si el archivo ya existe
+            const { data: existing } = await db.storage.from(bucketName).list(carpetaDestino);
+            const existe = existing?.some(f => f.name === file.name);
+            
+            if (existe) {
+                if (!confirm(`El archivo "${file.name}" ya existe. ¿Sobrescribir?`)) {
+                    continue;
+                }
+            }
+            
+            const { error } = await db.storage.from(bucketName).upload(rutaCompleta, file, { 
+                upsert: true,
+                cacheControl: 'no-cache'
+            });
+            
+            if (!error) {
+                cambios = true;
+                // Agregar a la estructura
+                if (!config.estructura[carpetaDestino]) {
+                    config.estructura[carpetaDestino] = [];
+                }
+                if (!config.estructura[carpetaDestino].includes(file.name)) {
+                    config.estructura[carpetaDestino].push(file.name);
+                }
+                mostrarMensaje(`Archivo "${file.name}" subido correctamente`);
+            } else {
+                console.error("Error al subir:", error);
+                mostrarMensaje(`Error al subir "${file.name}": ${error.message}`);
+            }
+        }
+        
+        if (cambios) {
+            await guardarMapa();
+            render();
+        }
+    }
+
+    async function eliminar(nombre, carpeta = '') {
+        if (!confirm(`¿Borrar archivo "${nombre}"?`)) return;
+        
+        const rutaCompleta = carpeta ? `${carpeta}/${nombre}` : nombre;
+        const { error } = await db.storage.from(bucketName).remove([rutaCompleta]);
+        
+        if (!error) {
+            // Eliminar de la estructura
+            if (config.estructura[carpeta]) {
+                config.estructura[carpeta] = config.estructura[carpeta].filter(n => n !== nombre);
+                if (config.estructura[carpeta].length === 0) {
+                    delete config.estructura[carpeta];
+                }
+            }
+            await guardarMapa();
+            render();
+            mostrarMensaje(`Archivo "${nombre}" eliminado`);
+        } else {
+            mostrarMensaje(`Error al eliminar: ${error.message}`);
+        }
+    }
+
+    async function renombrar(viejo, carpeta = '') {
+        const nuevo = prompt("Nuevo nombre:", viejo);
+        if (!nuevo || nuevo === viejo) return;
+        
+        const rutaVieja = carpeta ? `${carpeta}/${viejo}` : viejo;
+        const rutaNueva = carpeta ? `${carpeta}/${nuevo}` : nuevo;
+        
+        const { error } = await db.storage.from(bucketName).move(rutaVieja, rutaNueva);
+        
+        if (!error) {
+            if (config.estructura[carpeta]) {
+                config.estructura[carpeta] = config.estructura[carpeta].map(n => n === viejo ? nuevo : n);
+            }
+            await guardarMapa();
+            render();
+            mostrarMensaje(`Archivo renombrado a "${nuevo}"`);
+        } else {
+            mostrarMensaje(`Error al renombrar: ${error.message}`);
+        }
+    }
+
+    async function crearCarpeta() {
+        const nombreCarpeta = prompt("Nombre de la nueva carpeta:");
+        if (!nombreCarpeta) return;
+        
+        // Verificar si ya existe
+        if (config.estructura[nombreCarpeta] !== undefined) {
+            mostrarMensaje("Ya existe una carpeta con ese nombre");
+            return;
+        }
+        
+        // Crear carpeta virtual (subiendo un archivo placeholder)
+        const placeholder = new Blob([""], { type: "text/plain" });
+        const { error } = await db.storage.from(bucketName).upload(`${nombreCarpeta}/.placeholder`, placeholder);
+        
+        if (!error) {
+            config.estructura[nombreCarpeta] = [];
+            await guardarMapa();
+            render();
+            mostrarMensaje(`Carpeta "${nombreCarpeta}" creada`);
+        } else {
+            mostrarMensaje(`Error al crear carpeta: ${error.message}`);
+        }
+    }
+
+    async function eliminarCarpeta(carpeta) {
+        if (!confirm(`¿Eliminar toda la carpeta "${carpeta}" y su contenido?`)) return;
+        
+        // Obtener todos los archivos de la carpeta
+        const archivos = config.estructura[carpeta] || [];
+        const rutasAEliminar = archivos.map(n => `${carpeta}/${n}`);
+        rutasAEliminar.push(`${carpeta}/.placeholder`);
+        
+        const { error } = await db.storage.from(bucketName).remove(rutasAEliminar);
+        
+        if (!error) {
+            delete config.estructura[carpeta];
+            await guardarMapa();
+            render();
+            mostrarMensaje(`Carpeta "${carpeta}" eliminada`);
+        } else {
+            mostrarMensaje(`Error al eliminar carpeta: ${error.message}`);
+        }
+    }
+
+    function copiarLink(nombre, carpeta = '') {
+        const rutaCompleta = carpeta ? `${carpeta}/${nombre}` : nombre;
+        const { data } = db.storage.from(bucketName).getPublicUrl(rutaCompleta);
+        navigator.clipboard.writeText(data.publicUrl);
+        mostrarMensaje("Enlace copiado al portapapeles");
+    }
+
+    // --- RENDERIZADO ---
+    function render() {
+        const visor = document.getElementById('visualizador');
+        visor.innerHTML = "";
+        
+        // Mostrar archivos sueltos (raíz)
+        if (config.estructura[''] && config.estructura[''].length > 0) {
+            const raizSection = crearSeccionCarpeta('', 'Archivos en Raíz');
+            visor.appendChild(raizSection);
+        }
+        
+        // Mostrar carpetas
+        const carpetas = Object.keys(config.estructura).filter(c => c !== '').sort();
+        carpetas.forEach(carpeta => {
+            const folderSection = crearSeccionCarpeta(carpeta, carpeta);
+            visor.appendChild(folderSection);
+        });
+        
+        if (Object.keys(config.estructura).length === 0 || 
+            (Object.keys(config.estructura).length === 1 && !config.estructura[''])) {
+            visor.innerHTML = '<div style="text-align: center; padding: 40px; color: #999;"><i class="fas fa-cloud-upload-alt fa-3x"></i><p>No hay archivos. Arrastra archivos para comenzar</p></div>';
+        }
+    }
+    
+    function crearSeccionCarpeta(carpeta, titulo) {
+        const section = document.createElement('div');
+        section.className = "folder-section";
+        
+        const archivos = config.estructura[carpeta] || [];
+        const tieneContenido = archivos.length > 0;
+        
+        const header = document.createElement('div');
+        header.className = "folder-header";
+        header.innerHTML = `
+            <div style="display: flex; align-items: center;">
+                <i class="fas fa-chevron-down"></i>
+                <i class="fas fa-folder"></i>
+                <span>${titulo}</span>
+                <span style="margin-left: 10px; font-size: 12px; color: #666;">(${archivos.length} archivos)</span>
+            </div>
+            <div>
+                ${carpeta !== '' ? `<button class="btn btn-del" onclick="eliminarCarpeta('${carpeta}')" style="margin-right: 5px;"><i class="fas fa-folder-minus"></i></button>` : ''}
+            </div>
+        `;
+        
+        const content = document.createElement('div');
+        content.className = "folder-content";
+        
+        archivos.forEach(nombre => {
+            if (nombre === '.placeholder') return;
+            
+            const ext = nombre.split('.').pop().toLowerCase();
+            const rutaCompleta = carpeta ? `${carpeta}/${nombre}` : nombre;
+            const { data } = db.storage.from(bucketName).getPublicUrl(rutaCompleta);
+            const url = data.publicUrl;
+            
+            const item = document.createElement('div');
+            item.className = "file-item";
+            item.innerHTML = `
+                <div class="file-info" onclick="clickArchivo('${url}', '${ext}')">
+                    <i class="fas ${getIcon(ext)}" style="color:${getColor(ext)}"></i>
+                    <span class="file-name">${nombre}</span>
+                </div>
+                <div class="actions">
+                    <button class="btn" onclick="copiarLink('${nombre}', '${carpeta}')"><i class="fas fa-link"></i></button>
+                    <a href="${url}" download="${nombre}" class="btn"><i class="fas fa-download"></i></a>
+                    <button class="btn" onclick="renombrar('${nombre}', '${carpeta}')"><i class="fas fa-edit"></i></button>
+                    <button class="btn btn-del" onclick="eliminar('${nombre}', '${carpeta}')"><i class="fas fa-trash"></i></button>
+                </div>`;
+            content.appendChild(item);
+        });
+        
+        // Colapsar/Expandir
+        let collapsed = false;
+        header.onclick = (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            collapsed = !collapsed;
+            content.style.display = collapsed ? 'none' : 'block';
+            const icon = header.querySelector('.fa-chevron-down');
+            icon.style.transform = collapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
+        };
+        
+        section.appendChild(header);
+        section.appendChild(content);
+        
+        return section;
+    }
+
+    // --- UTILIDADES ---
+    function getIcon(ext) {
+        if (['jpg','png','jpeg','webp','gif','svg'].includes(ext)) return 'fa-image';
+        if (ext === 'pdf') return 'fa-file-pdf';
+        if (['mp4','webm','avi','mov'].includes(ext)) return 'fa-file-video';
+        if (['mp3','wav','ogg'].includes(ext)) return 'fa-file-audio';
+        if (['txt','md','json'].includes(ext)) return 'fa-file-alt';
+        if (['zip','rar','7z'].includes(ext)) return 'fa-file-archive';
+        return 'fa-file';
+    }
+
+    function getColor(ext) {
+        if (['jpg','png','jpeg','webp','gif'].includes(ext)) return '#27ae60';
+        if (ext === 'pdf') return '#e74c3c';
+        if (['mp4','webm','avi'].includes(ext)) return '#3498db';
+        if (['mp3','wav'].includes(ext)) return '#f39c12';
+        return '#7f8c8d';
+    }
+
+    function clickArchivo(url, ext) {
+        if (['jpg','png','jpeg','webp','gif','svg'].includes(ext)) {
+            document.getElementById('imgFull').src = url;
+            document.getElementById('previewModal').style.display = 'flex';
+        } else {
+            window.open(url, '_blank');
+        }
+    }
+    
+    function mostrarMensaje(texto) {
+        const msg = document.createElement('div');
+        msg.className = 'message';
+        msg.innerHTML = `<i class="fas fa-info-circle"></i> ${texto}`;
+        document.body.appendChild(msg);
+        setTimeout(() => msg.remove(), 3000);
+    }
+    
+    async function refreshAll() {
+        mostrarMensaje("Actualizando...");
+        await cargarMapa();
+        render();
+        mostrarMensaje("Actualizado correctamente");
+    }
+
+    // Eventos Drag & Drop
+    const da = document.getElementById('drop-area');
+    da.onclick = () => document.getElementById('fileElem').click();
+    da.ondragover = (e) => { e.preventDefault(); da.classList.add('highlight'); };
+    da.ondragleave = () => da.classList.remove('highlight');
+    da.ondrop = (e) => { e.preventDefault(); da.classList.remove('highlight'); handleFiles(e.dataTransfer.files, rutaActual); };
+
+    init();
+</script>
+</body>
+</html>
